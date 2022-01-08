@@ -21,7 +21,7 @@ import requests
 from subprocess import Popen
 
 from bpy.props import *
-from bpy.types import Context, Modifier, Object, Operator, PropertyGroup, Scene, UILayout
+from bpy.types import Context, DynamicPaintModifier, DynamicPaintSurface, FluidModifier, Modifier, Object, Operator, PropertyGroup, Scene, UILayout
 
 from . import require, mail
 
@@ -347,6 +347,7 @@ class ButlerAction(PropertyGroup):
         await_file_write(filepath, post_render)
 
     def run_bake(self, ctx: Context, callback):
+        '''Bakes the selected physics modifier.'''
         try:
             obj = ctx.scene.objects[self.target]
             mod = obj.modifiers[self.bake_modifier]
@@ -358,55 +359,13 @@ class ButlerAction(PropertyGroup):
         override['object'] = obj
         
         if mod.type == "FLUID":
-            do_mesh = self.bake_fluid_mesh and self.can_bake_fluid_mesh(ctx)
-            dom = mod.domain_settings
-
-            def on_data_baked():
-                print("data baked")
-                if do_mesh:
-                    print("baking mesh")
-                    bpy.ops.fluid.bake_mesh(override, "INVOKE_DEFAULT")
-                    await_interval(lambda: dom.cache_frame_pause_mesh >= dom.cache_frame_end, callback)
-                else:
-                    callback()
-
-            def on_data_freed():
-                print("now free")
-                bpy.ops.fluid.bake_data(override, "INVOKE_DEFAULT")
-                await_interval(lambda: dom.cache_frame_pause_data >= dom.cache_frame_end, on_data_baked)
-
-            if self.rebake:
-                print("freeing")
-                bpy.ops.fluid.free_all(override, "INVOKE_DEFAULT")
-                return await_interval(lambda: dom.cache_frame_pause_data <= dom.cache_frame_start, on_data_freed, interval=0.2)
-            else:
-                if dom.cache_frame_pause_data >= dom.cache_frame_end:
-                    return on_data_baked()
-                return on_data_freed()
-
-        if mod.type == "DYNAMIC_PAINT":
+            return self.run_bake_fluid(mod, override, ctx, callback)
+        elif mod.type == "DYNAMIC_PAINT":
             surface = mod.canvas_settings.canvas_surfaces[self.bake_paint_surface]
             if surface.surface_format == "IMAGE":
-                names = list()
-                if surface.use_output_a: names.append(surface.output_name_a)
-                if surface.use_output_b: names.append(surface.output_name_b)
-
-                if not len(names):
-                    print("Skipped baking because there no outputs would have been generated.")
-                    return callback()
-
-                format = surface.image_fileformat
-                lastframe = names[-1] + str(surface.frame_end).rjust(4, "0")
-                lastframe = bpy.path.ensure_ext(lastframe, ".png" if format == "PNG" else ".exr")
-                
-                filepath = os.path.join(bpy.path.abspath(surface.image_output_path), lastframe)
-                print("Waiting for ", filepath)
-
-                bpy.ops.dpaint.bake(override, "INVOKE_DEFAULT")
-                return await_file_write(filepath, callback)
+                return self.run_bake_dynamic_paint(surface, override, callback)
             else:
                 cache = surface.point_cache
-            
         else:
             cache = mod.point_cache
 
@@ -418,6 +377,64 @@ class ButlerAction(PropertyGroup):
             await_interval(lambda: cache.is_baked, callback)
         else:
             callback()
+    
+    def run_bake_fluid(self, mod: FluidModifier, override, ctx, callback):
+        '''Bakes a fluid domain.'''
+        do_mesh = self.bake_fluid_mesh and self.can_bake_fluid_mesh(ctx)
+        dom = mod.domain_settings
+
+        def on_data_baked():
+            print("data baked")
+            if do_mesh:
+                print("baking mesh")
+                bpy.ops.fluid.bake_mesh(override, "INVOKE_DEFAULT")
+                await_interval(lambda: dom.cache_frame_pause_mesh >= dom.cache_frame_end, callback)
+            else:
+                callback()
+
+        def on_data_freed():
+            print("now free")
+            bpy.ops.fluid.bake_data(override, "INVOKE_DEFAULT")
+            await_interval(lambda: dom.cache_frame_pause_data >= dom.cache_frame_end, on_data_baked)
+
+        if self.rebake:
+            print("freeing")
+            bpy.ops.fluid.free_all(override, "INVOKE_DEFAULT")
+            return await_interval(lambda: dom.cache_frame_pause_data <= dom.cache_frame_start, on_data_freed, interval=0.2)
+        else:
+            if dom.cache_frame_pause_data >= dom.cache_frame_end:
+                return on_data_baked()
+            return on_data_freed()
+    
+    def run_bake_dynamic_paint(self, surface: DynamicPaintSurface, override, callback):
+        '''Bakes a dynamic paint surface in "Image Sequence" mode.'''
+        names = list()
+        if surface.use_output_a: names.append(surface.output_name_a)
+        if surface.use_output_b: names.append(surface.output_name_b)
+
+        if not len(names):
+            print("Skipped because no outputs could have been generated.")
+            return callback()
+        
+        format = surface.image_fileformat
+
+        def lastframepath(name):
+            lastframe = name + str(surface.frame_end).rjust(4, "0")
+            lastframe = bpy.path.ensure_ext(lastframe, ".png" if format == "PNG" else ".exr")
+            return os.path.join(bpy.path.abspath(surface.image_output_path), lastframe)
+        
+        paths = [lastframepath(name) for name in names]
+
+        if not self.rebake:
+            if any([os.path.exists(path) for path in paths]):
+                print("Skipped because output image sequence already exists.")
+                return callback()
+        
+        filepath = paths[-1]
+        print("Waiting for ", filepath)
+
+        bpy.ops.dpaint.bake(override, "INVOKE_DEFAULT")
+        return await_file_write(filepath, callback)
 
 BUTLER_URL = "http://localhost:2048/update/blender-butler"
 
