@@ -148,6 +148,8 @@ def mod_icon(modtype):
         return "MOD_FLUIDSIM"
     elif modtype == "DYNAMIC_PAINT":
         return "MOD_DYNAMICPAINT"
+    elif modtype == "SOFT_BODY":
+        return "MOD_SOFT"
 
     return modtype
 
@@ -229,8 +231,9 @@ class ButlerAction(PropertyGroup):
 
                 targets.prop_search(self, "bake_modifier", obj, "bakeable", icon=icon, text="")
 
-                if mod is not None and mod.canvas_settings:
-                    targets.prop_search(self, "bake_paint_surface", mod.canvas_settings, "canvas_surfaces", icon="TPAINT_HLT", text="")
+                if mod is not None:
+                    if mod.type == "DYNAMIC_PAINT" and mod.canvas_settings:
+                        targets.prop_search(self, "bake_paint_surface", mod.canvas_settings, "canvas_surfaces", icon="TPAINT_HLT", text="")
 
             checks = col.row()
             checks.prop(self, "rebake")
